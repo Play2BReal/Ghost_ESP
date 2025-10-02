@@ -26,6 +26,7 @@
 #include "core/serial_manager.h"
 #include "managers/wifi_manager.h"
 #include "driver/i2c.h"
+#include "managers/status_display_manager.h"
 
 #ifdef CONFIG_USE_CARDPUTER
 #include "vendor/keyboard_handler.h"
@@ -1627,6 +1628,8 @@ void processEvent() {
   InputEvent event;
 
   while (processed < max_events && xQueueReceive(input_queue, &event, 0) == pdTRUE) {
+    // Any input event counts as activity for the SSD1306 idle animation
+    status_display_notify_activity();
     if (xSemaphoreTake(dm.mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) == pdTRUE) {
       View *current = dm.current_view;
       void (*input_callback)(InputEvent *) = NULL;
@@ -1649,6 +1652,7 @@ void processEvent() {
 
   if (processed == 0) {
     if (xQueueReceive(input_queue, &event, pdMS_TO_TICKS(1)) == pdTRUE) {
+      status_display_notify_activity();
       if (xSemaphoreTake(dm.mutex, pdMS_TO_TICKS(MUTEX_TIMEOUT_MS)) == pdTRUE) {
         View *current = dm.current_view;
         void (*input_callback)(InputEvent *) = NULL;

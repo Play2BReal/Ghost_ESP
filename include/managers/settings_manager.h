@@ -23,6 +23,13 @@ typedef enum {
   ALIGNMENT_BL  // Bottom Left
 } PrinterAlignment;
 
+// SSD1306 status display idle animation mode
+typedef enum {
+  SSD1306_IDLE_ALWAYS = 0,  // Always show idle animation (replaces status)
+  SSD1306_IDLE_5S = 1,      // Show status while active; idle anim after 5s
+  SSD1306_IDLE_NEVER = 2    // Never show idle animation (keep status)
+} SSD1306IdleMode;
+
 // Enum for Supported Boards
 typedef enum {
   FLIPPER_DEV_BOARD = 0,
@@ -107,6 +114,9 @@ typedef struct {
   
   // Neopixel settings
   uint8_t neopixel_max_brightness; // Max neopixel brightness (0-100)
+
+  // SSD1306 status display idle animation behavior
+  SSD1306IdleMode status_idle_mode; // 0=Always, 1=5s, 2=Never
 } FSettings;
 
 // Function declarations
@@ -255,6 +265,10 @@ uint8_t settings_get_menu_layout(const FSettings *settings);
 // Neopixel brightness settings
 void settings_set_neopixel_max_brightness(FSettings *settings, uint8_t brightness);
 uint8_t settings_get_neopixel_max_brightness(const FSettings *settings);
+
+// SSD1306 status display idle animation mode
+void settings_set_status_idle_mode(FSettings *settings, SSD1306IdleMode mode);
+SSD1306IdleMode settings_get_status_idle_mode(const FSettings *settings);
 
 extern FSettings G_Settings;
 

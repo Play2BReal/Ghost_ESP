@@ -15,6 +15,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/timers.h"
+#include "managers/settings_manager.h"
 
 static esp_err_t status_display_send(uint8_t control, const uint8_t *data, size_t len);
 
@@ -44,13 +45,50 @@ static TaskHandle_t s_anim_task;
 static TickType_t s_next_anim_allowed_tick;
 static int s_i2c_error_streak;
 
-// conway's life state
-#define LIFE_COLS 32
-#define LIFE_ROWS 16
-#define LIFE_CELL_SIZE 4
-static uint8_t s_life_grid[LIFE_ROWS][LIFE_COLS];
-static uint8_t s_life_next[LIFE_ROWS][LIFE_COLS];
-static bool s_life_active;
+// Forward declaration used by ghost drawing helpers
+static void status_display_plot_pixel(int x, int y, bool on);
+
+// simple ghost animation state
+static int s_anim_x;
+static int s_anim_dx = 2; // pixels per frame
+static int s_anim_bob_phase;
+
+// ghost idle bitmap (24x30px), 1bpp, row-major, MSB-first per byte
+static const int GHOST_W = 24;
+static const int GHOST_H = 30;
+static const uint8_t ghostidle_bits[] = {
+    0x00, 0x3f, 0x00, 0x00, 0xc0, 0xc0, 0x01, 0x00, 0x20, 0x02, 0x00, 0x10, 0x02, 0x00, 0x10, 0x02,
+    0x00, 0x08, 0x02, 0x0c, 0xc8, 0x02, 0x0c, 0xc8, 0x04, 0x1c, 0xc8, 0x04, 0x00, 0x08, 0x04, 0x01,
+    0x88, 0x04, 0x03, 0x88, 0x04, 0x00, 0x08, 0x04, 0x1c, 0x0e, 0x04, 0x62, 0x31, 0x08, 0x82, 0x41,
+    0x08, 0x0c, 0x02, 0x08, 0x30, 0x0c, 0x10, 0x40, 0x30, 0x10, 0x00, 0x10, 0x10, 0x00, 0x10, 0x10,
+    0x00, 0x20, 0x20, 0x00, 0x40, 0x20, 0x01, 0x80, 0x4e, 0x06, 0x00, 0xf1, 0xf0, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0f, 0xff, 0x80
+};
+
+static inline uint8_t ghost_get_bit(int x, int y) {
+    int bit_index = y * GHOST_W + x;
+    int byte_index = bit_index >> 3;
+    int bit_in_byte = 7 - (bit_index & 7);
+    if (byte_index < 0) return 0;
+    if ((size_t)byte_index >= sizeof(ghostidle_bits)) return 0;
+    return (ghostidle_bits[byte_index] >> bit_in_byte) & 0x1;
+}
+
+static void draw_ghost_bitmap(int x, int y, bool flip_h) {
+    // simple clipping; skip pixels outside 128x64
+    for (int yy = 0; yy < GHOST_H; ++yy) {
+        int sy = y + yy;
+        if (sy < 0 || sy >= 64) continue;
+        for (int xx = 0; xx < GHOST_W; ++xx) {
+            int sx = x + xx;
+            if (sx < 0 || sx >= 128) continue;
+            int src_x = flip_h ? (GHOST_W - 1 - xx) : xx;
+            if (ghost_get_bit(src_x, yy)) {
+                status_display_plot_pixel(sx, sy, true);
+            }
+        }
+    }
+}
 
 static const uint8_t font_5x7[][5] = {
     {0x00,0x00,0x00,0x00,0x00}, {0x00,0x00,0x5f,0x00,0x00}, {0x00,0x07,0x00,0x07,0x00},
@@ -186,13 +224,15 @@ static void status_display_render(const char *line_one, const char *line_two) {
 static void status_display_draw_idle_frame(void) {
     if (!s_ready) return;
     if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
-    // preserve current lines while drawing animation
-    status_display_render_locked(s_line1, s_line2);
-    // draw dot at bottom row
-    int y = 64 - 2; // near bottom
-    int range = 120; // travel range
-    int x = 4 + (s_anim_frame % range);
-    status_display_plot_pixel(x, y, true);
+    status_display_clear_buffer();
+    // bobbing vertical position using small triangle wave from phase
+    int y_base = 16 + (s_anim_bob_phase < 4 ? s_anim_bob_phase : 8 - s_anim_bob_phase); // 0..4..0
+    // Stabilize against odd/even row artifacts and stay on-screen
+    y_base &= ~1; // even rows only
+    if (y_base < 0) y_base = 0;
+    if (y_base > 64 - GHOST_H) y_base = 64 - GHOST_H;
+    bool flip = (s_anim_dx < 0);
+    draw_ghost_bitmap(s_anim_x, y_base, flip);
     status_display_flush();
     xSemaphoreGive(s_mutex);
 }
@@ -210,65 +250,25 @@ static void status_display_anim_task(void *arg) {
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         TickType_t now = xTaskGetTickCount();
-        if (now - s_last_update_tick < IDLE_TIMEOUT_TICKS) {
-            s_life_active = false;
-            continue;
+        SSD1306IdleMode mode = settings_get_status_idle_mode(&G_Settings);
+        bool should_animate = false;
+        if (mode == SSD1306_IDLE_ALWAYS) {
+            should_animate = true;
+        } else if (mode == SSD1306_IDLE_5S) {
+            should_animate = (now - s_last_update_tick >= IDLE_TIMEOUT_TICKS);
+        } else { // SSD1306_IDLE_NEVER
+            should_animate = false;
         }
+        if (!should_animate) continue;
         if (now < s_next_anim_allowed_tick) continue;
         s_next_anim_allowed_tick = now + ANIM_INTERVAL_TICKS;
-
-        if (!s_life_active) {
-            // seed life with pseudo-random pattern
-            uint32_t seed = (uint32_t)now;
-            seed ^= (uint32_t)((uintptr_t)&now);
-            seed = seed * 1664525u + 1013904223u;
-            for (int r = 0; r < LIFE_ROWS; ++r) {
-                for (int c = 0; c < LIFE_COLS; ++c) {
-                    seed = seed * 1664525u + 1013904223u;
-                    s_life_grid[r][c] = (seed >> 28) & 1;
-                }
-            }
-            s_life_active = true;
-        } else {
-            // step life
-            for (int r = 0; r < LIFE_ROWS; ++r) {
-                for (int c = 0; c < LIFE_COLS; ++c) {
-                    int live_neighbors = 0;
-                    for (int dr = -1; dr <= 1; ++dr) {
-                        for (int dc = -1; dc <= 1; ++dc) {
-                            if (dr == 0 && dc == 0) continue;
-                            int rr = (r + dr + LIFE_ROWS) % LIFE_ROWS;
-                            int cc = (c + dc + LIFE_COLS) % LIFE_COLS;
-                            live_neighbors += s_life_grid[rr][cc] ? 1 : 0;
-                        }
-                    }
-                    if (s_life_grid[r][c]) {
-                        s_life_next[r][c] = (live_neighbors == 2 || live_neighbors == 3) ? 1 : 0;
-                    } else {
-                        s_life_next[r][c] = (live_neighbors == 3) ? 1 : 0;
-                    }
-                }
-            }
-            for (int r = 0; r < LIFE_ROWS; ++r) memcpy(s_life_grid[r], s_life_next[r], LIFE_COLS);
-        }
-
-        if (xSemaphoreTake(s_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-            status_display_clear_buffer();
-            for (int r = 0; r < LIFE_ROWS; ++r) {
-                for (int c = 0; c < LIFE_COLS; ++c) {
-                    if (!s_life_grid[r][c]) continue;
-                    int sx = c * LIFE_CELL_SIZE;
-                    int sy = r * LIFE_CELL_SIZE;
-                    for (int yy = 0; yy < LIFE_CELL_SIZE; ++yy) {
-                        for (int xx = 0; xx < LIFE_CELL_SIZE; ++xx) {
-                            status_display_plot_pixel(sx + xx, sy + yy, true);
-                        }
-                    }
-                }
-            }
-            status_display_flush();
-            xSemaphoreGive(s_mutex);
-        }
+        // advance animation
+        s_anim_x += s_anim_dx;
+        if (s_anim_x < 0) { s_anim_x = 0; s_anim_dx = -s_anim_dx; }
+        int max_x = 128 - GHOST_W;
+        if (s_anim_x > max_x) { s_anim_x = max_x; s_anim_dx = -s_anim_dx; }
+        s_anim_bob_phase = (s_anim_bob_phase + 1) % 8; // 0..7
+        status_display_draw_idle_frame();
     }
 }
 
@@ -368,10 +368,14 @@ void status_display_init(void) {
     s_ready = true;
     status_display_sanitize(s_line1, sizeof(s_line1), "GhostESP: Revival");
     status_display_sanitize(s_line2, sizeof(s_line2), "made with <3");
+    // Start by showing status; animation task manages idle/always modes
     status_display_render(s_line1, s_line2);
     // setup idle animation timer
     s_last_update_tick = xTaskGetTickCount();
     s_anim_frame = 0;
+    s_anim_x = 0;
+    s_anim_dx = 2;
+    s_anim_bob_phase = 0;
     s_idle_timer = xTimerCreate("status_idle", ANIM_INTERVAL_TICKS, pdTRUE, NULL, status_display_idle_timer_cb);
     if (s_idle_timer) {
         xTimerStart(s_idle_timer, 0);
@@ -400,10 +404,12 @@ void status_display_set_lines(const char *line_one, const char *line_two) {
     if (strcmp(tmp1, s_line1) == 0 && strcmp(tmp2, s_line2) == 0) return;
     strcpy(s_line1, tmp1);
     strcpy(s_line2, tmp2);
-    status_display_render(s_line1, s_line2);
+    // Only render immediately if not in ALWAYS idle mode
+    if (settings_get_status_idle_mode(&G_Settings) != SSD1306_IDLE_ALWAYS) {
+        status_display_render(s_line1, s_line2);
+    }
     // reset idle timer
     s_last_update_tick = xTaskGetTickCount();
-    s_life_active = false;
 }
 
 void status_display_show_attack(const char *attack_name, const char *target) {
@@ -451,6 +457,15 @@ void status_display_deinit(void) {
     }
     if (s_i2c_configured) {
         s_i2c_configured = false;
+    }
+}
+
+void status_display_notify_activity(void) {
+    if (!s_ready) return;
+    s_last_update_tick = xTaskGetTickCount();
+    // If idle mode is 5s and we're potentially showing animation, restore status immediately
+    if (settings_get_status_idle_mode(&G_Settings) == SSD1306_IDLE_5S) {
+        status_display_render(s_line1, s_line2);
     }
 }
 

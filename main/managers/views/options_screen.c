@@ -55,10 +55,10 @@ static int current_settings_category = -1;
 // Example: settings_category_indices[0] lists settings for "Display" category.
 static int settings_category_indices[][10] = {
     #ifdef CONFIG_LV_DISP_BACKLIGHT_PWM
-        {1, 2, 5, 3, 4, 9, 11, 12, 13, -1}, // Display: Display Timeout, Menu Theme, Invert Colors, Third Control, Terminal Color, Max Brightness, Zebra Menus, Navigation Buttons, Menu Layout
+        {1, 2, 5, 3, 4, 9, 11, 12, 13, 14, -1}, // + Idle Animation
         {0, 6, 7, 8, 10, -1}, // Hardware config: RGB Mode, Web Auth, AP Enabled, Power Saving Mode, Neopixel Brightness
     #else
-        {1, 2, 5, 3, 4, 10, 11, 12, -1},     // Display: Display Timeout, Menu Theme, Invert Colors, Third Control, Terminal Color, Zebra Menus, Navigation Buttons, Menu Layout
+        {1, 2, 5, 3, 4, 10, 11, 12, 13, -1},     // + Idle Animation
         {0, 6, 7, 8, 9, -1}, // Hardware config: RGB Mode, Web Auth, AP Enabled, Power Saving Mode, Neopixel Brightness
     #endif
 };
@@ -139,6 +139,7 @@ static const char *bool_options[] = {"Off", "On"};
 static const char *textcolor_options[] = {"Green", "White", "Red", "Blue", "Yellow", "Cyan", "Magenta", "Orange"};
 static const uint32_t textcolor_values[] = {0x00FF00, 0xFFFFFF, 0xFF0000, 0x0000FF, 0xFFFF00, 0x00FFFF, 0xFF00FF, 0xFFA500};
 static const char *menu_layout_options[] = {"Normal", "Grid", "List"};
+static const char *ssd1306_idle_options[] = {"Always", "5 seconds", "Never"};
 
 enum {
     SETTING_RGB_MODE = 0,
@@ -154,7 +155,8 @@ enum {
     SETTING_NEOPIXEL_BRIGHTNESS,
     SETTING_ZEBRA_MENUS,
     SETTING_NAV_BUTTONS,
-    SETTING_MENU_LAYOUT
+    SETTING_MENU_LAYOUT,
+    SETTING_SSD1306_IDLE
 };
 
 static const char *brightness_options[] = {
@@ -177,7 +179,8 @@ static SettingsItem settings_items[] = {
     {"Neopixel Brightness", SETTING_NEOPIXEL_BRIGHTNESS, brightness_options, 10, 9}, // default 100%
     {"Zebra Menus", SETTING_ZEBRA_MENUS, bool_options, 2, 0},
     {"Navigation Buttons", SETTING_NAV_BUTTONS, bool_options, 2, 1},
-    {"Menu Layout", SETTING_MENU_LAYOUT, menu_layout_options, 3, 0}
+    {"Menu Layout", SETTING_MENU_LAYOUT, menu_layout_options, 3, 0},
+    {"Idle Animation", SETTING_SSD1306_IDLE, ssd1306_idle_options, 3, 1}
 };
 
 static bool is_settings_mode = false;
@@ -554,6 +557,9 @@ static void load_current_settings_values(void) {
             case SETTING_MENU_LAYOUT:
             settings_items[i].current_value = settings_get_menu_layout(&G_Settings);
                 break;
+            case SETTING_SSD1306_IDLE:
+                settings_items[i].current_value = (int)settings_get_status_idle_mode(&G_Settings);
+                break;
             case SETTING_MAX_BRIGHTNESS:
                 settings_items[i].current_value = (settings_get_max_screen_brightness(&G_Settings) / 10) - 1;
                 break;
@@ -620,6 +626,9 @@ static void apply_setting_change(int setting_index, int new_value) {
         case SETTING_MENU_LAYOUT:
             settings_set_menu_layout(&G_Settings, new_value);
             // The layout change will take effect on next menu creation
+            break;
+        case SETTING_SSD1306_IDLE:
+            settings_set_status_idle_mode(&G_Settings, (SSD1306IdleMode)new_value);
             break;
         #ifdef CONFIG_LV_DISP_BACKLIGHT_PWM
         // This setting is only available if LV_DISP_BACKLIGHT_PWM is enabled

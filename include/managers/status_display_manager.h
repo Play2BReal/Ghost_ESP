@@ -11,6 +11,9 @@ void status_display_show_status(const char *status_line);
 void status_display_clear(void);
 void status_display_deinit(void);
 
+// Notify the SSD1306 status display that user activity occurred (resets idle timer)
+void status_display_notify_activity(void);
+
 #endif // STATUS_DISPLAY_MANAGER_H
 
 

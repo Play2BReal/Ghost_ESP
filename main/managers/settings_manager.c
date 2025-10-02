@@ -59,6 +59,7 @@ static const char *NVS_MAX_SCREEN_BRIGHTNESS_KEY = "max_bright";
 static const char *NVS_NAV_BUTTONS_KEY = "nav_buttons";
 static const char *NVS_MENU_LAYOUT_KEY = "menu_layout";
 static const char *NVS_NEOPIXEL_MAX_BRIGHTNESS_KEY = "neopixel_bright";
+static const char *NVS_STATUS_IDLE_MODE_KEY = "status_idle";
 
 
 static const char *TAG = "SettingsManager";
@@ -154,6 +155,7 @@ void settings_set_defaults(FSettings *settings) {
   settings->nav_buttons_enabled = true; // Default to enabled
   settings->menu_layout = 0; // Default to carousel layout
   settings->neopixel_max_brightness = 100; // Default to 100% brightness
+  settings->status_idle_mode = SSD1306_IDLE_5S; // Default per request
 }
 
 void settings_load(FSettings *settings) {
@@ -468,6 +470,14 @@ void settings_load(FSettings *settings) {
   } else {
     settings->neopixel_max_brightness = 100; // Default to 100% if not found
   }
+
+  // Load SSD1306 status idle mode
+  err = nvs_get_u8(nvsHandle, NVS_STATUS_IDLE_MODE_KEY, &value_u8);
+  if (err == ESP_OK) {
+    settings->status_idle_mode = (SSD1306IdleMode)value_u8;
+  } else {
+    settings->status_idle_mode = SSD1306_IDLE_5S; // Default
+  }
 }
 
 static void update_rainbow_effect(const FSettings *settings) {
@@ -780,6 +790,10 @@ void settings_save(const FSettings *settings) {
 
   err = nvs_set_u8(nvsHandle, NVS_NEOPIXEL_MAX_BRIGHTNESS_KEY, settings->neopixel_max_brightness);
   if (err != ESP_OK) ESP_LOGE(S_TAG, "Failed to save neopixel_max_brightness: %s", esp_err_to_name(err));
+
+  // Save SSD1306 status idle mode
+  err = nvs_set_u8(nvsHandle, NVS_STATUS_IDLE_MODE_KEY, (uint8_t)settings->status_idle_mode);
+  if (err != ESP_OK) ESP_LOGE(S_TAG, "Failed to save status_idle_mode: %s", esp_err_to_name(err));
 
   err = nvs_commit(nvsHandle);
   if (err != ESP_OK) ESP_LOGE(S_TAG, "Failed to commit settings: %s", esp_err_to_name(err));
@@ -1226,4 +1240,12 @@ void settings_set_neopixel_max_brightness(FSettings *settings, uint8_t brightnes
 
 uint8_t settings_get_neopixel_max_brightness(const FSettings *settings) {
     return settings->neopixel_max_brightness;
+}
+
+void settings_set_status_idle_mode(FSettings *settings, SSD1306IdleMode mode) {
+  settings->status_idle_mode = mode;
+}
+
+SSD1306IdleMode settings_get_status_idle_mode(const FSettings *settings) {
+  return settings->status_idle_mode;
 }
